@@ -23,11 +23,11 @@ if np.mean(binary) > 127:  # Если больше белого чем черн�
 
 
 # только очень мелкие точки удаляем
-kernel_tiny = np.ones((1, 1), np.uint8)
+kernel_tiny = np.ones((2, 2), np.uint8)
 cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_tiny, iterations=1)
 
 # закрытие для соединения разрывов в буквах
-kernel_close = np.ones((1, 1), np.uint8)
+kernel_close = np.ones((2, 1), np.uint8)
 final = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel_close, iterations=1)
 
 # Показываем только оригинал и результат после удаления шумов
