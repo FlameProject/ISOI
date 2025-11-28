@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 
-image = cv2.imread('ep.jpg')
+image = cv2.imread('Data/5282775041139478422_121.jpg')
 
 # конвертация в градации серого
 gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -44,4 +44,4 @@ axes[1].axis('off')
 plt.tight_layout()
 plt.show()
 
-cv2.imwrite("ep_predobrabotka.png", final)
+cv2.imwrite("Data/ep_predobrabotka.png", final)
