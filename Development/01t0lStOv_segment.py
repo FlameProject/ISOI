@@ -3,7 +3,7 @@ import numpy as np
 import os
 from PIL import Image
 
-image_path = '1.png'
+image_path = 'Data/1.png'
 out_dir = 'chars'
 debug_dir = 'debug_masks'
 os.makedirs(out_dir, exist_ok=True)
