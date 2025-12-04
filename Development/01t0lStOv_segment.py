@@ -3,129 +3,221 @@ import numpy as np
 import os
 from PIL import Image
 
-image_path = '1.png'
-out_dir = 'chars'
-debug_dir = 'debug_masks'
-os.makedirs(out_dir, exist_ok=True)
-os.makedirs(debug_dir, exist_ok=True)
 
-img = cv2.imread(image_path)
-if img is None:
-    raise FileNotFoundError(f"Cannot read image: {image_path}")
-h, w = img.shape[:2]
+# 1. ЗАГРУЗКА ИЗОБРАЖЕНИЯ
+def load_image(image_path):
+    """Загрузка изображения с проверкой"""
+    img = cv2.imread(image_path)
+    if img is None:
+        # Пробуем найти файл
+        print(f"❌ Файл не найден: {image_path}")
+        print("\n📁 Доступные файлы в папке:")
+        current_dir = os.getcwd()
+        for file in os.listdir(current_dir):
+            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                print(f"  - {file}")
 
-# Utility functions
-def save_debug(name, mat):
-    cv2.imwrite(os.path.join(debug_dir, name), mat)
+        # Запрашиваем правильное имя
+        new_path = input("\nВведи правильное имя файла: ").strip()
+        if not os.path.exists(new_path):
+            print("❌ Файл не существует!")
+            exit()
+        img = cv2.imread(new_path)
 
-def find_boxes(bin_img, min_area=10):
-    cnts = cv2.findContours(bin_img.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
+    print(f"✅ Изображение загружено: {img.shape[1]}x{img.shape[0]}")
+    return img
+
+
+# 2. ПРОСТАЯ БИНАРИЗАЦИЯ ДЛЯ ТЕКСТА
+def binarize_image(img):
+    """Преобразуем в черно-белое для поиска символов"""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Автоматическое определение: темный текст на светлом фоне или наоборот
+    mean_intensity = np.mean(gray)
+
+    if mean_intensity > 127:  # Светлый фон
+        # Текст темный, нужно инвертировать
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    else:  # Темный фон
+        # Текст светлый
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    return binary
+
+
+# 3. ПОИСК ОТДЕЛЬНЫХ СИМВОЛОВ
+def find_characters(binary_img, min_width=5, min_height=10):
+    """Находит bounding boxes отдельных символов"""
+    # Находим контуры
+    contours, _ = cv2.findContours(binary_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
     boxes = []
-    for c in cnts:
-        x, y, ww, hh = cv2.boundingRect(c)
-        area = ww * hh
-        if area < min_area or ww < 2 or hh < 2:
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+
+        # Фильтруем слишком маленькие объекты
+        if w < min_width or h < min_height:
             continue
-        boxes.append((x, y, ww, hh))
+
+        # Фильтруем слишком большие объекты (скорее всего не символ)
+        if w > binary_img.shape[1] * 0.5 or h > binary_img.shape[0] * 0.5:
+            continue
+
+        boxes.append((x, y, w, h))
+
+    # Сортируем слева направо, сверху вниз
+    boxes = sorted(boxes, key=lambda b: (b[1] // 20, b[0]))
+
     return boxes
 
-def save_crops(boxes, orig, prefix=''):
-    saved = []
-    pad = 2
-    for i, (x, y, ww, hh) in enumerate(boxes, 1):
-        x1 = max(0, x-pad); y1 = max(0, y-pad)
-        x2 = min(orig.shape[1], x+ww+pad); y2 = min(orig.shape[0], y+hh+pad)
-        crop = orig[y1:y2, x1:x2]
-        fname = os.path.join(out_dir, f"{prefix}char_{i:03d}.png")
-        Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)).save(fname)
-        saved.append(fname)
-    return saved
 
-# Try multiple preprocessing variants until contours are found
-median_sizes = [77, 51, 31, 15, 7]       # try large->small
-threshold_methods = ['otsu', 'adaptive'] # try both
-invert_options = [True, False]           # invert mask if needed
-morph_kernels = [ (2,1), (2,2), (3,1), (3,3) ]
+# 4. РАЗДЕЛЕНИЕ СЛИПШИХСЯ СИМВОЛОВ
+def split_connected_characters(boxes, binary_img, max_width_ratio=1.5):
+    """Пытается разделить слишком широкие bounding boxes"""
+    split_boxes = []
 
-found = False
-attempt = 0
-results = []
+    for x, y, w, h in boxes:
+        # Если символ слишком широкий для своей высоты
+        if w > h * max_width_ratio:
+            # Вырезаем область из бинарного изображения
+            roi = binary_img[y:y + h, x:x + w]
 
-for m in median_sizes:
-    # avoid invalid odd/even issues for very small images
-    m_blur = m if m % 2 == 1 else m+1
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # local background removal
-    bg = cv2.medianBlur(gray, m_blur)
-    div = cv2.divide(gray, bg, scale=255)
-    save_debug(f"attempt_{attempt}_div_m{m_blur}.png", div)
-    # CLAHE might be helpful but try both with and without:
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    enhanced = clahe.apply(div)
-    save_debug(f"attempt_{attempt}_enhanced_m{m_blur}.png", enhanced)
+            # Проекция по горизонтали (сколько белых пикселей в каждом столбце)
+            projection = np.sum(roi == 255, axis=0)
 
-    for thm in threshold_methods:
-        if thm == 'otsu':
-            _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            # Находим "провалы" в проекции - возможные места разделения
+            threshold = np.max(projection) * 0.1
+            valleys = np.where(projection < threshold)[0]
+
+            if len(valleys) > 1:
+                # Разделяем на несколько символов
+                split_points = [0]
+
+                for i in range(1, len(valleys)):
+                    if valleys[i] - valleys[i - 1] > 1:
+                        split_points.append((valleys[i - 1] + valleys[i]) // 2)
+
+                split_points.append(w)
+
+                # Создаем новые bounding boxes
+                for i in range(len(split_points) - 1):
+                    new_x = x + split_points[i]
+                    new_w = split_points[i + 1] - split_points[i]
+                    if new_w > 5:  # Минимальная ширина
+                        split_boxes.append((new_x, y, new_w, h))
+            else:
+                split_boxes.append((x, y, w, h))
         else:
-            binary = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                           cv2.THRESH_BINARY, 31, 15)
-        save_debug(f"attempt_{attempt}_binary_{thm}_m{m_blur}.png", binary)
+            split_boxes.append((x, y, w, h))
 
-        for inv in invert_options:
-            bin_work = binary.copy()
-            if inv:
-                bin_work = cv2.bitwise_not(bin_work)
-            save_debug(f"attempt_{attempt}_binary_{thm}_inv{inv}_m{m_blur}.png", bin_work)
+    return split_boxes
 
-            for kx, ky in morph_kernels:
-                kernel_open = np.ones((kx, ky), np.uint8)
-                # open to remove tiny noise
-                cleaned = cv2.morphologyEx(bin_work, cv2.MORPH_OPEN, kernel_open, iterations=1)
-                # close to connect strokes
-                kernel_close = np.ones((kx, ky), np.uint8)
-                final = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel_close, iterations=1)
-                save_debug(f"attempt_{attempt}_final_m{m_blur}_{thm}_inv{inv}_k{kx}x{ky}.png", final)
 
-                # optionally try small dilation to connect fragments
-                dil = cv2.dilate(final, np.ones((2,2), np.uint8), iterations=1)
-                save_debug(f"attempt_{attempt}_dilated_m{m_blur}_{thm}_inv{inv}_k{kx}x{ky}.png", dil)
+# 5. ВИЗУАЛИЗАЦИЯ РЕЗУЛЬТАТОВ
+def draw_boxes(img, boxes, output_path="boxes_result.png"):
+    """Рисует bounding boxes на изображении"""
+    result = img.copy()
+    for i, (x, y, w, h) in enumerate(boxes):
+        cv2.rectangle(result, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.putText(result, str(i + 1), (x, y - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
-                # search boxes on final and dilated
-                boxes = find_boxes(final, min_area=20)
-                boxes_dil = find_boxes(dil, min_area=20)
+    cv2.imwrite(output_path, result)
+    print(f"📊 Результат с bounding boxes сохранен как '{output_path}'")
 
-                # choose the larger set
-                chosen = boxes if len(boxes) >= len(boxes_dil) else boxes_dil
-                results.append({
-                    'attempt': attempt,
-                    'median': m_blur,
-                    'th': thm,
-                    'inv': inv,
-                    'kernel': (kx, ky),
-                    'boxes': len(chosen),
-                    'final_img': f"attempt_{attempt}_final_m{m_blur}_{thm}_inv{inv}_k{kx}x{ky}.png"
-                })
+    # Показываем изображение
+    try:
+        from PIL import Image as PILImage
+        img_pil = PILImage.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+        img_pil.show()
+    except:
+        pass
 
-                if len(chosen) >= 1:
-                    # save crops and stop (we found something)
-                    boxes_sorted = sorted(chosen, key=lambda b: (b[1], b[0]))
-                    prefix = f"m{m_blur}_{thm}_inv{int(inv)}_k{kx}x{ky}_"
-                    saved = save_crops(boxes_sorted, img, prefix=prefix)
-                    print(f"FOUND {len(saved)} boxes on attempt {attempt} -> saved to {out_dir} with prefix {prefix}")
-                    found = True
-                    break
-                # next kernel
-            if found: break
-        if found: break
-        attempt += 1
-    if found: break
+    return result
 
-# If nothing found at all, give user suggestions and show top attempts
-if not found:
-    print("Не найдено контуров.")
-    # show top 6 attempts with highest box counts
-    results_sorted = sorted(results, key=lambda r: r['boxes'], reverse=True)
-    for r in results_sorted[:6]:
-        print(f"attempt {r['attempt']}: median={r['median']} th={r['th']} inv={r['inv']} kernel={r['kernel']} boxes={r['boxes']} final_image={r['final_img']}")
+
+# 6. СОХРАНЕНИЕ КАЖДОГО СИМВОЛА ОТДЕЛЬНО
+def save_characters(img, boxes, output_dir="characters"):
+    """Сохраняет каждый символ как отдельный файл"""
+    os.makedirs(output_dir, exist_ok=True)
+
+    saved_files = []
+
+    for i, (x, y, w, h) in enumerate(boxes, 1):
+        # Добавляем небольшой отступ вокруг символа
+        padding = 3
+        x1 = max(0, x - padding)
+        y1 = max(0, y - padding)
+        x2 = min(img.shape[1], x + w + padding)
+        y2 = min(img.shape[0], y + h + padding)
+
+        # Вырезаем символ
+        char_img = img[y1:y2, x1:x2]
+
+        # Сохраняем
+        filename = f"char_{i:03d}.png"
+        filepath = os.path.join(output_dir, filename)
+
+        # Конвертируем и сохраняем
+        Image.fromarray(cv2.cvtColor(char_img, cv2.COLOR_BGR2RGB)).save(filepath)
+        saved_files.append(filepath)
+
+        print(f"  ✓ {filename} ({char_img.shape[1]}x{char_img.shape[0]})")
+
+    return saved_files
+
+
+# ОСНОВНАЯ ФУНКЦИЯ
+def main():
+    print("=" * 50)
+    print("🎯 ВЫРЕЗАНИЕ ОТДЕЛЬНЫХ СИМВОЛОВ")
+    print("=" * 50)
+
+    # Имя файла
+    image_file = "2.png"
+
+    # 1. Загружаем изображение
+    print("\n1. Загрузка изображения...")
+    img = load_image(image_file)
+
+    # 2. Бинаризация
+    print("\n2. Бинаризация...")
+    binary = binarize_image(img)
+
+    # 3. Поиск символов
+    print("\n3. Поиск символов...")
+    boxes = find_characters(binary, min_width=3, min_height=8)
+    print(f"   Найдено контуров: {len(boxes)}")
+
+    # 4. Разделение слипшихся символов
+    print("\n4. Проверка на слипшиеся символы...")
+    boxes = split_connected_characters(boxes, binary, max_width_ratio=1.3)
+    print(f"   После разделения: {len(boxes)} символов")
+
+    if len(boxes) == 0:
+        print("❌ Символы не найдены! Попробуй другую картинку.")
+        return
+
+    # 5. Визуализация
+    print("\n5. Визуализация результатов...")
+    result_img = draw_boxes(img, boxes)
+
+    # 6. Сохранение каждого символа
+    print(f"\n6. Сохранение {len(boxes)} символов...")
+    saved = save_characters(img, boxes)
+
+    print("\n" + "=" * 50)
+    print(f"✅ ГОТОВО! Сохранено {len(saved)} символов в папку 'characters'")
+    print("=" * 50)
+
+    # 7. Показываем статистику
+    print("\n📊 СТАТИСТИКА:")
+    for i, (x, y, w, h) in enumerate(boxes, 1):
+        print(f"  Символ {i:2d}: позиция ({x:4d},{y:4d}), размер {w:3d}x{h:3d}")
+
+
+# ЗАПУСК
+if __name__ == "__main__":
+    main()
+    input("\nНажми Enter для выхода...")
