@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Загрузка изображения
-image = cv2.imread('Data\\op.jpg')
+image = cv2.imread('Data\\ep.jpg')
 if image is None:
     raise FileNotFoundError("Не удалось загрузить изображение. Проверьте путь: Data\\op.jpg")
 
@@ -50,3 +50,5 @@ axes[1].axis('off')
 
 plt.tight_layout()
 plt.show()
+output_filename = 'Data\\ep_predobrabotka.png'  # PNG лучше сохраняет качество
+cv2.imwrite(output_filename, final)
