@@ -16,6 +16,39 @@ import torch
 import torch.nn.functional as F
 
 
+def assemble_text_with_spaces(boxes, chars, space_ratio=0.6, line_ratio=0.8):
+    """
+    boxes: [(x, y, w, h), ...]
+    chars: ['п', 'р', 'и', ...]
+    """
+    if not boxes or not chars:
+        return ""
+
+    result = chars[0]
+
+    widths = [w for (_, _, w, _) in boxes]
+    avg_width = np.mean(widths)
+
+    for i in range(1, len(chars)):
+        x, y, w, h = boxes[i]
+        px, py, pw, ph = boxes[i - 1]
+
+        gap_x = x - (px + pw)
+        gap_y = abs(y - py)
+
+        # 🔹 перенос строки
+        if gap_y > ph * line_ratio:
+            result += "\n"
+
+        # 🔹 пробел
+        elif gap_x > avg_width * space_ratio:
+            result += " "
+
+        result += chars[i]
+
+    return result
+
+
 class OCRAppEnhanced:
     def __init__(self, root):
         self.root = root
@@ -848,6 +881,7 @@ class OCRAppEnhanced:
         # Сохраняем ссылку
         self.characters_tab.canvas = canvas
 
+
     def recognize(self):
         """Распознавание символов"""
         if not self.char_images:
@@ -863,13 +897,15 @@ class OCRAppEnhanced:
             self.log("\n🧠 ЗАПУСК РАСПОЗНАВАНИЯ")
 
             # Используем универсальное распознавание
-            text, chars, confs, processed_imgs, alternatives = \
-                recognize_characters(
-                    self.model,
-                    self.device,
-                    self.config,
-                    self.char_images)
+            text_raw, chars, confs, processed_imgs, alternatives = recognize_characters(
+                self.model,
+                self.device,
+                self.config,
+                self.char_images
+            )
 
+            # ⬇️ ВАЖНО: сборка текста с пробелами
+            text = assemble_text_with_spaces(self.boxes, chars)
             # Сохраняем результаты
             self.recognized_text = text
             self.recognized_chars = chars
